@@ -46,7 +46,8 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.8.2")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
 
-    // FFmpegKit LTS version (last stable release before project discontinuation)
-    // Provides ffmpeg and ffprobe binaries for Android
-    implementation("com.arthenica:ffmpeg-kit-full:6.0-2.LTS")
+    // FFmpegKit LTS — 通过 JitPack 从 GitHub 源码编译
+    // arthenica/ffmpegkit 已停更，Maven Central 不提供 AAR
+    // JitPack 会自动从 GitHub release tag 编译 AAR
+    implementation("com.github.arthenica:ffmpeg-kit:v6.0-2.LTS")
 }
