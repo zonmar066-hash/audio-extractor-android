@@ -12,7 +12,6 @@ import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
-import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.Spinner
@@ -24,7 +23,6 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.arthenica.ffmpegkit.FFmpegSession
 import com.glennalex.audioextractor.R
 import com.glennalex.audioextractor.model.AudioFile
 import com.glennalex.audioextractor.model.ConvertOptions
@@ -49,10 +47,9 @@ class MainActivity : AppCompatActivity() {
     private val fileList = mutableListOf<AudioFile>()
     private val fileAdapter = FileAdapter(fileList)
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var currentSession: FFmpegSession? = null
+    private var isConverting = false
     private var convertOptions = ConvertOptions()
 
-    // 文件选择器
     private val filePickerLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -71,7 +68,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // 权限请求
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
@@ -182,7 +178,6 @@ class MainActivity : AppCompatActivity() {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
             putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-            // 同时支持视频和音频
             putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("video/*", "audio/*"))
         }
         filePickerLauncher.launch(intent)
@@ -191,7 +186,7 @@ class MainActivity : AppCompatActivity() {
     private fun addFiles(uris: List<Uri>) {
         val newFiles = uris.map { uri ->
             val cursor = contentResolver.query(uri, null, null, null, null)
-            val displayName = cursor?.use {
+            cursor?.use {
                 val nameIndex = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
                 val sizeIndex = it.getColumnIndex(android.provider.OpenableColumns.SIZE)
                 it.moveToFirst()
@@ -199,7 +194,6 @@ class MainActivity : AppCompatActivity() {
                 val size = if (sizeIndex >= 0) it.getLong(sizeIndex) else 0L
                 AudioFile(uri, name, size, contentResolver.getType(uri) ?: "*/*")
             } ?: AudioFile(uri, uri.lastPathSegment ?: "unknown", 0L, "*/*")
-            displayName
         }
 
         fileAdapter.addAll(newFiles)
@@ -229,8 +223,7 @@ class MainActivity : AppCompatActivity() {
     /**
      * 开始批量转换
      *
-     * 关键：FFmpegKit 回调在后台线程，所有 UI 更新通过 mainHandler.post 切回主线程
-     * 这解决了 "Only the original thread that created a view hierarchy can touch its views" 异常
+     * 纯 Android API，所有 UI 更新通过 mainHandler.post 切回主线程
      */
     private fun startConversion() {
         val pendingFiles = fileList.mapIndexedNotNull { index, file ->
@@ -249,6 +242,7 @@ class MainActivity : AppCompatActivity() {
         btnClear.isEnabled = false
         progressBar.visibility = View.VISIBLE
         tvProgress.visibility = View.VISIBLE
+        isConverting = true
 
         processFilesSequentially(pendingFiles, 0)
     }
@@ -258,13 +252,13 @@ class MainActivity : AppCompatActivity() {
         currentIndex: Int
     ) {
         if (currentIndex >= files.size) {
-            // 全部完成
             mainHandler.post {
                 btnSelectFiles.isEnabled = true
                 btnConvert.isEnabled = true
                 btnClear.isEnabled = true
                 progressBar.visibility = View.GONE
                 tvProgress.visibility = View.GONE
+                isConverting = false
                 updateSummary()
                 Toast.makeText(this, "批量处理完成", Toast.LENGTH_LONG).show()
             }
@@ -280,59 +274,42 @@ class MainActivity : AppCompatActivity() {
             progressBar.progress = (currentIndex.toFloat() / total * 100).toInt()
         }
 
-        // 更新状态为检测中（主线程）
+        // Step 1: 检测音频轨道
         mainHandler.post {
             fileAdapter.updateItem(originalIndex, file.copy(status = ProcessStatus.CHECKING))
         }
 
-        // Step 1: 检测音频轨道（解决报错1：无音频轨道）
         Thread {
             val hasAudio = AudioProcessor.hasAudioTrack(this, file.uri)
 
             if (!hasAudio) {
-                // 无音频轨道，跳过（主线程更新 UI）
                 mainHandler.post {
                     fileAdapter.updateItem(originalIndex, file.copy(
                         status = ProcessStatus.NO_AUDIO_TRACK,
                         errorMessage = "该文件没有音频轨道"
                     ))
                     updateSummary()
-                    // 处理下一个文件
                     processFilesSequentially(files, currentIndex + 1)
                 }
                 return@Thread
             }
 
-            // 有音频轨道，开始转换
-            val inputPath = UriUtils.getPathFromUri(this, file.uri)
-            if (inputPath == null) {
-                mainHandler.post {
-                    fileAdapter.updateItem(originalIndex, file.copy(
-                        status = ProcessStatus.ERROR,
-                        errorMessage = "无法获取文件路径"
-                    ))
-                    updateSummary()
-                    processFilesSequentially(files, currentIndex + 1)
-                }
-                return@Thread
-            }
-
+            // 获取输出路径
             val outputPath = AudioProcessor.getOutputPath(this, file.displayName)
 
-            // 更新状态为转换中（主线程）
+            // 更新状态为转换中
             mainHandler.post {
                 fileAdapter.updateItem(originalIndex, file.copy(status = ProcessStatus.PROCESSING))
             }
 
-            // Step 2: 执行 FFmpeg 转换（解决报错2：线程安全）
-            // 回调在后台线程，UI 更新通过 mainHandler.post 切回主线程
-            currentSession = AudioProcessor.convert(
-                inputPath = inputPath,
+            // Step 2: 执行转换（纯 Android API）
+            AudioProcessor.convert(
+                context = this,
+                inputUri = file.uri,
                 outputPath = outputPath,
                 options = convertOptions,
                 onComplete = { success, message ->
-                    // 此回调在 FFmpegKit 后台线程！
-                    // 必须切回主线程更新 UI
+                    // 此回调在后台线程
                     mainHandler.post {
                         if (success) {
                             fileAdapter.updateItem(originalIndex, file.copy(
@@ -349,11 +326,10 @@ class MainActivity : AppCompatActivity() {
                         processFilesSequentially(files, currentIndex + 1)
                     }
                 },
-                onProgress = { timeMs ->
-                    // 此回调在 FFmpegKit 后台线程！
-                    // 进度更新也需切回主线程
+                onProgress = { progress ->
+                    // 此回调在后台线程
                     mainHandler.post {
-                        val percent = ((currentIndex.toFloat() + (timeMs / 1000.0)) / total * 100).toInt()
+                        val percent = ((currentIndex + progress) / total * 100).toInt()
                             .coerceIn(0, 100)
                         progressBar.progress = percent
                     }
@@ -364,6 +340,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        currentSession?.cancel()
+        // 纯 Android API，无需取消 session
     }
 }
