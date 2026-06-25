@@ -46,7 +46,6 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.8.2")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
 
-    // FFmpegKit — Maven Central 上的 LTS 版本（版本号是 6.0.LTS）
-    // 包含完整 FFmpeg + ffprobe，支持 loudnorm 滤镜
-    implementation("com.arthenica:ffmpeg-kit-full:6.0.LTS")
+    // 无第三方依赖 — 纯 Android 原生 MediaCodec + MediaExtractor
+    // 响度标准化使用 RMS-based 方案（近似 -14 LUFS）
 }
