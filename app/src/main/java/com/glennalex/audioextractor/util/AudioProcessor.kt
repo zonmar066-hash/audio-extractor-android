@@ -288,7 +288,7 @@ object AudioProcessor {
 
         // 配置 AAC 编码器
         val encoderFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, targetSampleRate, channelCount)
-        encoderFormat.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaFormat.AACObjectLC)
+        encoderFormat.setInteger(MediaFormat.KEY_AAC_PROFILE, 2) // AAC-LC profile = 2
         encoderFormat.setInteger(MediaFormat.KEY_BIT_RATE, parseBitrate(bitrate))
         encoderFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
 
