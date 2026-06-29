@@ -1,7 +1,10 @@
 package com.glennalex.audioextractor.model
 
 import android.net.Uri
+import android.os.Parcelable
+import kotlinx.parcelize.Parcelize
 
+@Parcelize
 data class AudioFile(
     val uri: Uri,
     val displayName: String,
@@ -10,7 +13,7 @@ data class AudioFile(
     var status: ProcessStatus = ProcessStatus.PENDING,
     var errorMessage: String? = null,
     var outputPath: String? = null
-)
+) : Parcelable
 
 enum class ProcessStatus {
     PENDING,

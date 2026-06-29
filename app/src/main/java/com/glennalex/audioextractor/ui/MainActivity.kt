@@ -1,6 +1,7 @@
 package com.glennalex.audioextractor.ui
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -25,12 +26,12 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.glennalex.audioextractor.R
 import com.glennalex.audioextractor.model.AudioFile
+import com.glennalex.audioextractor.model.BitrateMode
 import com.glennalex.audioextractor.model.ConvertOptions
 import com.glennalex.audioextractor.model.ProcessStatus
 import com.glennalex.audioextractor.model.SampleRateMode
-import com.glennalex.audioextractor.util.AudioProcessor
+import com.glennalex.audioextractor.service.ConvertService
 import com.glennalex.audioextractor.util.FileAdapter
-import com.glennalex.audioextractor.util.UriUtils
 
 class MainActivity : AppCompatActivity() {
 
@@ -40,6 +41,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvSummary: TextView
     private lateinit var recyclerView: RecyclerView
     private lateinit var spinnerSampleRate: Spinner
+    private lateinit var spinnerBitrate: Spinner
     private lateinit var progressBar: ProgressBar
     private lateinit var tvProgress: TextView
     private lateinit var layoutOptions: LinearLayout
@@ -49,6 +51,9 @@ class MainActivity : AppCompatActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var isConverting = false
     private var convertOptions = ConvertOptions()
+
+    // 当前转换的文件在 fileList 中的索引列表
+    private var convertingIndices: List<Int> = emptyList()
 
     private val filePickerLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -84,8 +89,62 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         initViews()
-        setupSpinner()
+        setupSpinners()
         setupRecyclerView()
+
+        // 请求通知权限（Android 13+）
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                    100
+                )
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        registerServiceCallbacks()
+    }
+
+    private fun registerServiceCallbacks() {
+        ConvertService.onFileStatusChange = { index, status, outputPath, errorMessage ->
+            // index 是在 convertingIndices 中的序号，映射回 fileList
+            if (index < convertingIndices.size) {
+                val realIndex = convertingIndices[index]
+                fileList[realIndex].status = status
+                fileList[realIndex].outputPath = outputPath
+                fileList[realIndex].errorMessage = errorMessage
+                fileAdapter.notifyItemChanged(realIndex)
+                updateSummary()
+            }
+        }
+
+        ConvertService.onProgress = { current, total, fileName, percent ->
+            tvProgress.text = "($current/$total) $fileName"
+            progressBar.progress = percent
+        }
+
+        ConvertService.onComplete = { success, message ->
+            isConverting = false
+            btnSelectFiles.isEnabled = true
+            btnConvert.isEnabled = true
+            btnClear.isEnabled = true
+            progressBar.visibility = View.GONE
+            tvProgress.visibility = View.GONE
+            fileAdapter.notifyDataSetChanged()
+            updateSummary()
+
+            // 完成/报错弹窗
+            AlertDialog.Builder(this)
+                .setTitle(if (success) "转换完成" else "转换结束")
+                .setMessage(message)
+                .setPositiveButton("确定", null)
+                .show()
+        }
     }
 
     private fun initViews() {
@@ -95,12 +154,13 @@ class MainActivity : AppCompatActivity() {
         tvSummary = findViewById(R.id.tvSummary)
         recyclerView = findViewById(R.id.recyclerView)
         spinnerSampleRate = findViewById(R.id.spinnerSampleRate)
+        spinnerBitrate = findViewById(R.id.spinnerBitrate)
         progressBar = findViewById(R.id.progressBar)
         tvProgress = findViewById(R.id.tvProgress)
         layoutOptions = findViewById(R.id.layoutOptions)
 
         btnSelectFiles.setOnClickListener {
-            checkPermissionAndOpenPicker()
+            if (!isConverting) checkPermissionAndOpenPicker()
         }
 
         btnConvert.setOnClickListener {
@@ -108,11 +168,13 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnClear.setOnClickListener {
-            fileAdapter.clear()
-            updateSummary()
-            layoutOptions.visibility = View.GONE
-            btnConvert.visibility = View.GONE
-            btnClear.visibility = View.GONE
+            if (!isConverting) {
+                fileAdapter.clear()
+                updateSummary()
+                layoutOptions.visibility = View.GONE
+                btnConvert.visibility = View.GONE
+                btnClear.visibility = View.GONE
+            }
         }
 
         progressBar.isIndeterminate = false
@@ -120,14 +182,15 @@ class MainActivity : AppCompatActivity() {
         progressBar.progress = 0
     }
 
-    private fun setupSpinner() {
-        val adapter = ArrayAdapter(
+    private fun setupSpinners() {
+        // 采样率
+        val srAdapter = ArrayAdapter(
             this,
             android.R.layout.simple_spinner_item,
             SampleRateMode.entries.map { it.displayName }
         )
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        spinnerSampleRate.adapter = adapter
+        srAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        spinnerSampleRate.adapter = srAdapter
 
         spinnerSampleRate.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
@@ -142,7 +205,26 @@ class MainActivity : AppCompatActivity() {
                     }
                 )
             }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
 
+        // 比特率
+        val brAdapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_item,
+            BitrateMode.entries.map { it.displayName }
+        )
+        brAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        spinnerBitrate.adapter = brAdapter
+
+        // 默认选 192k（index 2）
+        spinnerBitrate.setSelection(2)
+
+        spinnerBitrate.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val mode = BitrateMode.fromIndex(position)
+                convertOptions = convertOptions.copy(bitrate = mode.value)
+            }
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
     }
@@ -221,125 +303,53 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 开始批量转换
-     *
-     * 纯 Android API，所有 UI 更新通过 mainHandler.post 切回主线程
+     * 开始批量转换 — 通过 Foreground Service 后台运行
      */
     private fun startConversion() {
-        val pendingFiles = fileList.mapIndexedNotNull { index, file ->
+        // 收集待处理文件的索引和对象
+        val pendingIndexed = fileList.mapIndexedNotNull { index, file ->
             if (file.status == ProcessStatus.PENDING || file.status == ProcessStatus.ERROR) {
                 index to file
             } else null
         }
 
-        if (pendingFiles.isEmpty()) {
+        if (pendingIndexed.isEmpty()) {
             Toast.makeText(this, "没有待处理的文件", Toast.LENGTH_SHORT).show()
             return
         }
 
+        // 保存索引映射
+        convertingIndices = pendingIndexed.map { it.first }
+
+        // 重置错误文件状态
+        pendingIndexed.forEach { (index, _) ->
+            fileList[index].status = ProcessStatus.PENDING
+            fileList[index].errorMessage = null
+        }
+        fileAdapter.notifyDataSetChanged()
+
+        isConverting = true
         btnSelectFiles.isEnabled = false
         btnConvert.isEnabled = false
         btnClear.isEnabled = false
         progressBar.visibility = View.VISIBLE
         tvProgress.visibility = View.VISIBLE
-        isConverting = true
+        tvProgress.text = "启动后台转换..."
 
-        processFilesSequentially(pendingFiles, 0)
-    }
+        // 收集文件列表
+        val pendingFiles = ArrayList(pendingIndexed.map { it.second })
 
-    private fun processFilesSequentially(
-        files: List<Pair<Int, AudioFile>>,
-        currentIndex: Int
-    ) {
-        if (currentIndex >= files.size) {
-            mainHandler.post {
-                btnSelectFiles.isEnabled = true
-                btnConvert.isEnabled = true
-                btnClear.isEnabled = true
-                progressBar.visibility = View.GONE
-                tvProgress.visibility = View.GONE
-                isConverting = false
-                updateSummary()
-                Toast.makeText(this, "批量处理完成", Toast.LENGTH_LONG).show()
-            }
-            return
+        // 启动 Foreground Service
+        val intent = Intent(this, ConvertService::class.java).apply {
+            action = ConvertService.ACTION_START
+            putParcelableArrayListExtra(ConvertService.EXTRA_FILES, pendingFiles)
+            putExtra(ConvertService.EXTRA_OPTIONS, convertOptions)
         }
 
-        val (originalIndex, file) = files[currentIndex]
-        val total = files.size
-        val current = currentIndex + 1
-
-        mainHandler.post {
-            tvProgress.text = "($current/$total) ${file.displayName}"
-            progressBar.progress = (currentIndex.toFloat() / total * 100).toInt()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
         }
-
-        // Step 1: 检测音频轨道
-        mainHandler.post {
-            fileAdapter.updateItem(originalIndex, file.copy(status = ProcessStatus.CHECKING))
-        }
-
-        Thread {
-            val hasAudio = AudioProcessor.hasAudioTrack(this, file.uri)
-
-            if (!hasAudio) {
-                mainHandler.post {
-                    fileAdapter.updateItem(originalIndex, file.copy(
-                        status = ProcessStatus.NO_AUDIO_TRACK,
-                        errorMessage = "该文件没有音频轨道"
-                    ))
-                    updateSummary()
-                    processFilesSequentially(files, currentIndex + 1)
-                }
-                return@Thread
-            }
-
-            // 获取输出路径
-            val outputPath = AudioProcessor.getOutputPath(this, file.displayName)
-
-            // 更新状态为转换中
-            mainHandler.post {
-                fileAdapter.updateItem(originalIndex, file.copy(status = ProcessStatus.PROCESSING))
-            }
-
-            // Step 2: 执行转换（纯 Android API）
-            AudioProcessor.convert(
-                context = this,
-                inputUri = file.uri,
-                outputPath = outputPath,
-                options = convertOptions,
-                onComplete = { success, message ->
-                    // 此回调在后台线程
-                    mainHandler.post {
-                        if (success) {
-                            fileAdapter.updateItem(originalIndex, file.copy(
-                                status = ProcessStatus.DONE,
-                                outputPath = outputPath
-                            ))
-                        } else {
-                            fileAdapter.updateItem(originalIndex, file.copy(
-                                status = ProcessStatus.ERROR,
-                                errorMessage = message
-                            ))
-                        }
-                        updateSummary()
-                        processFilesSequentially(files, currentIndex + 1)
-                    }
-                },
-                onProgress = { progress ->
-                    // 此回调在后台线程
-                    mainHandler.post {
-                        val percent = ((currentIndex + progress) / total * 100).toInt()
-                            .coerceIn(0, 100)
-                        progressBar.progress = percent
-                    }
-                }
-            )
-        }.start()
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        // 纯 Android API，无需取消 session
     }
 }
